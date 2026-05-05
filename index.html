@@ -170,6 +170,11 @@ textarea:focus { outline:none; border-color:var(--accent); }
 .bingo-cell .emoji { font-size:24px; margin-bottom:4px; line-height:1; }
 @media (max-width: 480px) { .bingo { grid-template-columns:repeat(3, 1fr); } }
 
+.backup-grid {
+  display:grid; grid-template-columns:1fr 1fr; gap:8px;
+}
+@media (max-width: 480px) { .backup-grid { grid-template-columns:1fr; } }
+
 .diploma {
   background:linear-gradient(135deg, #1a1a22, #15151a);
   border:1px solid var(--accent); border-radius:16px;
@@ -257,6 +262,21 @@ textarea:focus { outline:none; border-color:var(--accent); }
   <div class="card">
     <h2>🏆 Hall of Shame — Top 3 più assurde</h2>
     <div id="hall"></div>
+  </div>
+
+  <div class="card">
+    <h2>💾 Backup & Sicurezza</h2>
+    <p class="muted">Streak, scuse aggiunte e bingo vivono nel browser. Se cancelli i dati o cambi telefono, perdi tutto. <strong style="color:var(--text);">Salva un backup ogni domenica.</strong></p>
+    <div id="backup-status" style="font-size:13px; color:var(--text-dim); margin-bottom:12px;"></div>
+    <div class="backup-grid">
+      <button class="btn" id="backup-share">📤 Mandalo a Giacomo</button>
+      <button class="btn" id="backup-download">📥 Scarica come file</button>
+    </div>
+    <button class="btn btn-ghost" id="backup-import-btn" style="margin-top:8px; width:100%;">📂 Carica backup da file</button>
+    <input type="file" id="backup-file" accept="application/json" style="display:none;">
+    <p class="muted" style="margin-top:14px; margin-bottom:0; font-size:12px;">
+      Tip: aggiungi questa pagina ai segnalibri DOPO aver fatto un backup. Il link contiene già lo stato — bookmark = save game.
+    </p>
   </div>
 
   <div class="card diploma" id="diploma">
@@ -501,6 +521,7 @@ function renderBingo() {
       state.bingoHits[i] = !state.bingoHits[i];
       STORAGE.set('bingoHits', state.bingoHits);
       el.classList.toggle('hit');
+      syncToHash();
     });
   });
 }
@@ -516,6 +537,92 @@ function recordAttempt(ontime, excuse, cat) {
   STORAGE.set('attempts', state.attempts);
   renderStats();
   renderTimeline();
+  syncToHash();
+}
+
+// === Backup & restore ===
+function encodeState() {
+  const data = { v:1, t:Date.now(), a:state.attempts, b:state.bingoHits };
+  return btoa(unescape(encodeURIComponent(JSON.stringify(data))));
+}
+function decodeState(s) {
+  try { return JSON.parse(decodeURIComponent(escape(atob(s)))); } catch { return null; }
+}
+function syncToHash() {
+  const encoded = encodeState();
+  history.replaceState(null, '', location.pathname + location.search + '#s=' + encoded);
+}
+function updateBackupStatus() {
+  const last = STORAGE.get('lastBackup', 0);
+  const el = document.getElementById('backup-status');
+  if (!el) return;
+  if (last) {
+    const days = Math.floor((Date.now() - last) / 86400000);
+    const human = days === 0 ? 'oggi' : days === 1 ? 'ieri' : days + ' giorni fa';
+    el.innerHTML = `Ultimo backup esplicito: <strong style="color:var(--text);">${human}</strong>`;
+  } else {
+    el.innerHTML = '<span style="color:var(--warn);">⚠ Mai fatto un backup esplicito.</span>';
+  }
+}
+async function shareBackup() {
+  const url = location.origin + location.pathname + '#s=' + encodeState();
+  STORAGE.set('lastBackup', Date.now());
+  updateBackupStatus();
+  const text = 'Backup Andrea Punctuality OS — clicca per ripristinare lo stato:';
+  try {
+    if (navigator.share) {
+      await navigator.share({ title: 'Andrea Punctuality OS — backup', text, url });
+      showToast('Backup condiviso.');
+    } else if (navigator.clipboard) {
+      await navigator.clipboard.writeText(url);
+      showToast('Link copiato. Mandalo a chi vuoi.');
+    } else {
+      prompt('Copia questo link:', url);
+    }
+  } catch { /* user cancelled */ }
+}
+function downloadBackup() {
+  const data = { v:1, exported:new Date().toISOString(), attempts:state.attempts, bingoHits:state.bingoHits };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type:'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'andrea-punctuality-backup-' + todayISO() + '.json';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+  STORAGE.set('lastBackup', Date.now());
+  updateBackupStatus();
+  showToast('File di backup scaricato.');
+}
+function importBackup(file) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const data = JSON.parse(e.target.result);
+      if (state.attempts.length > 0 && !confirm('Sovrascrivere lo stato attuale con il backup?')) return;
+      state.attempts = data.attempts || data.a || [];
+      state.bingoHits = data.bingoHits || data.b || {};
+      STORAGE.set('attempts', state.attempts);
+      STORAGE.set('bingoHits', state.bingoHits);
+      renderStats(); renderTimeline(); renderBingo(); syncToHash();
+      showToast('✓ Backup ripristinato.');
+    } catch { showToast('File non valido.'); }
+  };
+  reader.readAsText(file);
+}
+function loadFromHashIfFresh() {
+  if (!location.hash.startsWith('#s=')) return false;
+  const decoded = decodeState(location.hash.slice(3));
+  if (!decoded || !decoded.a) return false;
+  const fresh = state.attempts.length === 0 && Object.keys(state.bingoHits).length === 0;
+  if (fresh) {
+    state.attempts = decoded.a;
+    state.bingoHits = decoded.b || {};
+    STORAGE.set('attempts', state.attempts);
+    STORAGE.set('bingoHits', state.bingoHits);
+    setTimeout(() => showToast('💾 Stato ripristinato dal link di backup.'), 400);
+    return true;
+  }
+  return false;
 }
 
 document.getElementById('btn-arrived').addEventListener('click', () => {
@@ -574,16 +681,29 @@ document.getElementById('classify-btn').addEventListener('click', () => {
 document.getElementById('reset-btn').addEventListener('click', () => {
   if (confirm('Cancello la cronologia locale (streak, scuse aggiunte, bingo)?\n\nLe 11 scuse storiche restano.')) {
     Object.keys(localStorage).filter(k => k.startsWith('aps_')).forEach(k => localStorage.removeItem(k));
+    history.replaceState(null, '', location.pathname + location.search);
     location.reload();
   }
 });
 
+document.getElementById('backup-share').addEventListener('click', shareBackup);
+document.getElementById('backup-download').addEventListener('click', downloadBackup);
+document.getElementById('backup-import-btn').addEventListener('click', () => document.getElementById('backup-file').click());
+document.getElementById('backup-file').addEventListener('change', e => {
+  const f = e.target.files[0];
+  if (f) importBackup(f);
+  e.target.value = '';
+});
+
+loadFromHashIfFresh();
 renderCountdown();
 setInterval(renderCountdown, 1000);
 renderStats();
 renderTimeline();
 renderHall();
 renderBingo();
+updateBackupStatus();
+syncToHash();
 </script>
 </body>
 </html>
